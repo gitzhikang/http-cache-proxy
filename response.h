@@ -51,11 +51,11 @@ public:
     bool is_no_store() { return no_store; }
     bool is_private_cache() { return private_cache; }
     bool is_cacheable() {
-      //if no-cache is true, and etag or last-modified is empty
-        return !(no_cache && etag == "" && last_modified == "")&& !no_store && !private_cache;
+        bool no_cache_condition = no_cache && etag == "" && last_modified == "";
+        return !no_cache_condition && !no_store && !private_cache;
     }
     bool need_revalidation() {
-        return etag != "" || last_modified != "";
+        return etag!="" || last_modified!="";
     }
 
 

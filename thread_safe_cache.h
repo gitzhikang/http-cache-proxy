@@ -40,9 +40,9 @@ public:
             pthread_rwlock_unlock(&rwlock);
             return nullptr;
         }
-        Response value = it->second;
+        Response* result = &(it->second);
         pthread_rwlock_unlock(&rwlock);
-        return &value;
+        return result;
     }
 
     void erase(const std::string &key) {

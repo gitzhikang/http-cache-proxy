@@ -51,6 +51,7 @@ void Proxy::run() {
 void* Proxy::thread_handler(void* arg) {
   ThreadData* data = static_cast<ThreadData*>(arg);
   void* result = data->proxy->handle_request(data);
+  close(data->client_socket_fd);
   delete data;
   return result;
 }
@@ -90,7 +91,7 @@ void * Proxy::handle_request(void * info){
   }
 
   //log the request
-  std::string request_log = std::to_string(thread_data->client_id) + ": \"" + req.get_line()+"\" from " + thread_data->client_ip + " @ " + get_current_time().append("\0");
+  std::string request_log = std::to_string(thread_data->client_id) + ": \"" + req.get_line()+"\" from " + thread_data->client_ip + " @ " + get_current_time();
   write_log_with_lock(request_log);
 
   //handle request according to the method
@@ -111,10 +112,11 @@ void * Proxy::handle_request(void * info){
   }catch (std::invalid_argument &e){
     write_log_with_lock("(no-id): Error: " + std::string(e.what()));
     //send 400 to the client
-    close(client_socket_fd);
     close(origin_server_fd);
     return NULL;
   }
+
+  close(origin_server_fd);
 
 
 }
@@ -128,7 +130,6 @@ void Proxy::handle_get(int client_socket_fd, int origin_socket_fd, int client_id
   std::string query_key = get_cache_query_key(client_socket_fd,req);
   Response cached_res;
   if(cache.find(query_key)){
-
     cached_res = *cache.get(query_key);
     if(cached_res.need_revalidation()){
       //if the no-cache is true, send the request to the origin server to validate the cache
@@ -150,10 +151,12 @@ void Proxy::handle_get(int client_socket_fd, int origin_socket_fd, int client_id
       //process response with differnt code
       if(validation_res.get_response_code() == "304"){
         //if the response code is 304, send the cached response to the client
+        write_log_with_lock(std::to_string(client_id) + ": NOTE cache is still valid after validation");
         send_response_to_client(client_socket_fd,true,cached_res.get_origin_response().c_str(),cached_res);
         write_log_with_lock(std::to_string(client_id) + ": Responding \"" + cached_res.get_line());
       }else if(validation_res.get_response_code() == "200"){
         //if the response code is 200, update the cache and send the response to the client
+        write_log_with_lock(std::to_string(client_id) + ": NOTE cache is not valid after validation");
         save_response_to_cache(query_key,validation_res,client_id);
         send_response_to_client(client_socket_fd,false,validation_res.get_origin_response().c_str(),cached_res);
         write_log_with_lock(std::to_string(client_id) + ": Responding \"" + validation_res.get_line());
@@ -170,6 +173,7 @@ void Proxy::handle_get(int client_socket_fd, int origin_socket_fd, int client_id
         std::string max_age_expire_time = max_age_to_GMT(respnse_time,cached_res.get_max_age());
         if(is_GMT_time_greater_than_current_time(max_age_expire_time)){
           //if the response is not expired, send the cached response to the client
+          write_log_with_lock(std::to_string(client_id) + ": in cache, valid");
           send_response_to_client(client_socket_fd,true,cached_res.get_origin_response().c_str(),cached_res);
           write_log_with_lock(std::to_string(client_id) + ": Responding \"" + cached_res.get_line());
         }else{
@@ -187,6 +191,7 @@ void Proxy::handle_get(int client_socket_fd, int origin_socket_fd, int client_id
         }
       }else{
         //if the response has no max-age and expires, send the cached response to the client
+        write_log_with_lock(std::to_string(client_id) + ": in cache, valid");
         send_response_to_client(client_socket_fd,true,cached_res.get_origin_response().c_str(),cached_res);
         write_log_with_lock(std::to_string(client_id) + ": Responding \"" + cached_res.get_line());
       }
@@ -313,14 +318,14 @@ void Proxy::write_log_with_lock(const std::string &log){
 
 void Proxy::save_response_to_cache(std::string key,Response &res,int client_id){
   if(!res.is_cacheable()){
-    write_log_with_lock(std::to_string(client_id)+": not cacheable because " + (res.is_no_cache()?"no-cache":res.is_no_store()?"no-store":res.is_private_cache()?"private":res.get_max_age() == 0?"max-age=0":"Error"));
+    write_log_with_lock(std::to_string(client_id)+": not cacheable because " + (res.is_no_store()?"no-store":res.is_private_cache()?"private":res.get_max_age() == 0?"max-age=0":"no-cache format error"));
     return;
   }
   std::string response_time = res.get_response_time();
   if(res.get_max_age() != -1){
-    write_log_with_lock(std::to_string(client_id)+": cached, expires at"+ max_age_to_GMT(response_time,res.get_max_age()));
+    write_log_with_lock(std::to_string(client_id)+": cached, expires at "+ max_age_to_GMT(response_time,res.get_max_age()));
   }else if(!res.get_expires().empty()){
-    write_log_with_lock(std::to_string(client_id)+": cached, expires at"+ res.get_expires());
+    write_log_with_lock(std::to_string(client_id)+": cached, expires at "+ res.get_expires());
   }
   if(res.get_etag() != "" || res.get_last_modified() != ""){
     write_log_with_lock(std::to_string(client_id)+": cached, but requires re-validation");

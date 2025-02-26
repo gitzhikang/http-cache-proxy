@@ -22,7 +22,7 @@ void Response::pharse_response(std::string &response_str){
     if(pos == std::string::npos){
         throw std::invalid_argument("Invalid response: No header found");
     }
-    std::string header = response_str.substr(0,pos);
+    std::string header = response_str.substr(0,pos + 4);
 
     //pharse the response line
     pos = header.find("\r\n");

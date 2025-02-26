@@ -180,7 +180,11 @@ std::string get_current_time(){
     time_t currTime = time(0);
     struct tm * nowTime = gmtime(&currTime);
     const char * t = asctime(nowTime);
-    return std::string(t);
+    std::string timeStr(t);
+    if (!timeStr.empty() && timeStr[timeStr.length()-1] == '\n') {
+        timeStr.erase(timeStr.length()-1);
+    }
+    return timeStr;
 }
 
 void get_entire_http_request_by_content_length(int client_socket_fd, std::string &req_msg,size_t content_length){
@@ -426,9 +430,9 @@ std::string add_Age_to_response(const char * content,Response &res){
 }
 
 std::string get_cache_query_key(int client_socket_fd,Request& req){
-    std::string client_ip = get_peer_socket_ip(client_socket_fd);
-    std::string client_port = std::to_string(get_peer_socket_port(client_socket_fd));
-    return client_ip+client_port+req.get_line();
+    // std::string client_ip = get_peer_socket_ip(client_socket_fd);
+    // std::string client_port = std::to_string(get_peer_socket_port(client_socket_fd));
+    return req.get_line();
 }
 
 std::string max_age_to_GMT(std::string& response_time_str,int max_age){
@@ -467,6 +471,9 @@ bool is_GMT_time_greater_than_current_time(std::string &time_str){
     time_t gmt_time = timegm(&tm);
 
     time_t now = time(nullptr);
+
+    std::cout << "gmt_time: " << gmt_time << std::endl;
+    std::cout << "now: " << now << std::endl;
 
     return gmt_time > now;
 }
