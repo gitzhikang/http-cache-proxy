@@ -1,0 +1,13 @@
+HTTP/1.1 200 OK
+Content-Type: text/html
+Content-Length: 94
+Expires: Thu, 26 Feb 2025 21:46:00 GMT
+Date: Wed, 26 Feb 2025 21:40:00 GMT
+Server: netcat-server
+
+<html>
+<body>
+<h1>Hello World</h1>
+<p>This is a response from netcat!</p>
+</body>
+</html>

@@ -1,0 +1,11 @@
+HTTP/1.1 200 OK
+Content-Type: text/html
+Content-Length: 94
+Server: netcat-server
+
+<html>
+<body>
+<h1>Hello World</h1>
+<p>This is a response from netcat!</p>
+</body>
+</html>

@@ -1,0 +1,14 @@
+HTTP/1.1 200 OK
+Content-Type: text/html
+Content-Length: 94
+Server: netcat-server
+Cache-Control: no-cache
+ETag: "686897696a7c876b7e"
+Date: Wed, 26 Feb 2025 12:00:00 GMT
+
+<html>
+<body>
+<h1>Hello World</h1>
+<p>This is a response from netcat!</p>
+</body>
+</html>

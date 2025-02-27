@@ -1,0 +1,14 @@
+HTTP/1.1 200 OK
+Content-Type: text/html
+Content-Length: 94
+Cache-Control: max-age=15
+Date: Wed, 26 Feb 2025 21:36:11 GMT
+Server: netcat-server
+
+
+<html>
+<body>
+<h1>Hello World</h1>
+<p>This is a response from netcat!</p>
+</body>
+</html>
