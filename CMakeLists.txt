@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.29)
+cmake_minimum_required(VERSION 3.22.1)
 project(cache_proxy)
 
 # 设置 C++ 标准
@@ -13,6 +13,8 @@ set(SOURCES
         request.cpp
         response.cpp
         utils.cpp
+        worker_reactor.cpp
+        thread_pool.cpp
 )
 
 # 头文件列表
@@ -23,6 +25,9 @@ set(HEADERS
         response.h
         thread_safe_cache.h
         utils.h
+        worker_reactor.h
+        connection_info.h
+        thread_pool.h
 )
 
 # 添加可执行文件

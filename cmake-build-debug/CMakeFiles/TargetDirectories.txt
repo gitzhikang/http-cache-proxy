@@ -1,3 +1,0 @@
-/Users/songzhikang/CLionProjects/cache-proxy/cmake-build-debug/CMakeFiles/cache_proxy.dir
-/Users/songzhikang/CLionProjects/cache-proxy/cmake-build-debug/CMakeFiles/edit_cache.dir
-/Users/songzhikang/CLionProjects/cache-proxy/cmake-build-debug/CMakeFiles/rebuild_cache.dir

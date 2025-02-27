@@ -2,7 +2,12 @@
 // Created by 宋志康 on 2025/2/19.
 //
 
+
 #include "request.h"
+
+#include <algorithm>
+#include <stdexcept>
+
 #include "utils.h"
 void Request::pharse_request(std::string request){
     //pharse the request line

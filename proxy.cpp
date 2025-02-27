@@ -5,7 +5,10 @@
 #include "proxy.h"
 #include "utils.h"
 #include "info.h"
+#include "connection_info.h"
 #include "request.h"
+#include "sys/epoll.h"
+#include "worker_reactor.h"
 #include <pthread.h>
 #include <string>
 #include <iostream>
@@ -18,47 +21,143 @@ std::string response_400 = "HTTP/1.1 400 Bad Request\r\n\r\n";
 std::string response_200 = "HTTP/1.1 200 OK\r\n\r\n";
 std::string response_502 = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
 
-void Proxy::run() {
+void Proxy::run(int worker_count, int thread_pool_size) {
   std::cout<<"Proxy server is running on port "<<port_num<<std::endl;
+  main_epoll_fd = epoll_create1(0);
+  if(main_epoll_fd == -1){
+    write_log_with_lock("(no-id): Error cannot create main epoll instance");
+    exit(EXIT_FAILURE);
+  }
+
   int proxy_socket_fd = build_server_socket(port_num);
   if (proxy_socket_fd == -1) {
-    write_log_with_lock("(no-id): Error: cannot create proxy server socket");
+    write_log_with_lock("(no-id): Error cannot create proxy server socket");
+    exit(EXIT_FAILURE);
   }
 
-  int client_id = 0;
-  while (true) {
-    std::string client_ip;
-    int client_socket_fd = block_accept(proxy_socket_fd, &client_ip);
-    if (client_socket_fd == -1) {
-      write_log_with_lock("(no-id): Error: cannot accept connection on proxy server socket");
-      continue;
+  if (WorkerReactor::set_nonblocking(proxy_socket_fd) == -1) {
+    write_log_with_lock("(no-id): Error: cannot set server socket to non-blocking");
+    exit(EXIT_FAILURE);
+  }
+
+  std::cout<<"Add proxy_socket_fd to epoll list"<<std::endl;
+  struct epoll_event ev;
+  ev.events = EPOLLIN; // LT mode
+  ev.data.fd = proxy_socket_fd;
+  if (epoll_ctl(main_epoll_fd, EPOLL_CTL_ADD, proxy_socket_fd, &ev) == -1) {
+    perror("Main epoll_ctl: server_fd");
+    exit(EXIT_FAILURE);
+  }
+
+  //set up the worker reactors
+  std::cout << "Setting up worker reactors" << std::endl;
+  pipes.resize(worker_count);
+  for (int i = 0; i < worker_count; ++i) {
+    int pipe_fds[2];
+    if (pipe(pipe_fds) == -1) {
+      perror("pipe");
+      exit(EXIT_FAILURE);
     }
 
-    // 创建新的线程数据
-    ThreadData* thread_data = new ThreadData{
-      this,                  // proxy指针
-      client_socket_fd,      // 客户端socket
-      client_ip,            // 客户端IP
-      client_id++                   // 客户端ID
-  };
+    pipes[i].first = pipe_fds[0];
+    pipes[i].second = pipe_fds[1];
 
+    // 创建worker reactor
+    WorkerReactor* worker = new WorkerReactor(this, pipe_fds[0], thread_pool_size);
+    worker_reactors.push_back(worker);
+
+    // 启动worker reactor线程
     pthread_t thread;
-    pthread_create(&thread, NULL, &Proxy::thread_handler, thread_data);
+    pthread_create(&thread, NULL, [](void* arg) -> void* {
+        WorkerReactor* reactor = static_cast<WorkerReactor*>(arg);
+        reactor->run();
+        return NULL;
+    }, worker);
+    worker_threads.push_back(thread);
   }
+
+  //wait for connection
+  std::cout << "Waiting for connection" << std::endl;
+  struct epoll_event events[64];
+  while (true) {
+    int n = epoll_wait(main_epoll_fd, events, 64, -1);
+    if (n == -1) {
+      if (errno == EINTR) continue;
+      perror("Main epoll_wait");
+      break;
+    }
+
+    for (int i = 0; i < n; i++) {
+      if (events[i].data.fd == proxy_socket_fd) {
+        // 接受新连接
+        std::string client_ip;
+        int client_fd = accept_connection(proxy_socket_fd, client_ip);
+        if (client_fd == -1) {
+          write_log_with_lock("(no-id): Error: cannot accept connection");
+          continue;
+        }
+
+        // 创建连接信息
+        ConnectionInfo conn_info;
+        conn_info.client_socket_fd = client_fd;
+        conn_info.client_id = client_id_counter++;
+
+        // 轮询选择worker
+        int worker_index = next_worker;
+        next_worker = (next_worker + 1) % worker_reactors.size();
+
+        std::cout << "Sending connection info to worker " << worker_index << std::endl;
+        // 将连接信息写入对应worker的管道
+        write(pipes[worker_index].second, &conn_info, sizeof(conn_info));
+      }
+    }
+  }
+
+  // int client_id = 0;
+  // while (true) {
+  //   std::string client_ip;
+  //   int client_socket_fd = block_accept(proxy_socket_fd, &client_ip);
+  //   if (client_socket_fd == -1) {
+  //     write_log_with_lock("(no-id): Error cannot accept connection on proxy server socket");
+  //     continue;
+  //   }
+  //
+  //   // 创建新的线程数据
+  //   ThreadData* thread_data = new ThreadData{
+  //     this,                  // proxy指针
+  //     client_socket_fd,      // 客户端socket
+  //     client_ip,            // 客户端IP
+  //     client_id++                   // 客户端ID
+  // };
+  //
+  //   pthread_t thread;
+  //   pthread_create(&thread, NULL, &Proxy::thread_handler, thread_data);
+  // }
 }
 
-// 静态线程处理函数，用于启动实际的处理方法
-void* Proxy::thread_handler(void* arg) {
-  ThreadData* data = static_cast<ThreadData*>(arg);
-  void* result = data->proxy->handle_request(data);
-  close(data->client_socket_fd);
-  delete data;
-  return result;
+int Proxy::accept_connection(int server_fd, std::string &client_ip) {
+  std::cout<<"Accepting connection"<<std::endl;
+  struct sockaddr_in client_addr;
+  socklen_t client_len = sizeof(client_addr);
+  int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+
+  if (client_fd == -1) {
+    perror("accept");
+    return -1;
+  }
+
+  // 获取客户端IP
+  char ip_str[INET_ADDRSTRLEN];
+  inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
+  client_ip = std::string(ip_str);
+
+  return client_fd;
 }
 
-void * Proxy::handle_request(void * info){
-  ThreadData* thread_data = static_cast<ThreadData*>(info);
-  int client_socket_fd = thread_data->client_socket_fd;
+void * Proxy::handle_request(ConnectionInfo* conn_info){
+  std::cout<<"Handling request from client"<<std::endl;
+  int client_socket_fd = conn_info->client_socket_fd;
+  int client_id = conn_info->client_id;
 
   //the length of HTTP head is less than 8KB, to fetch the http head
   char req_msg_buffer[8192];
@@ -91,7 +190,7 @@ void * Proxy::handle_request(void * info){
   }
 
   //log the request
-  std::string request_log = std::to_string(thread_data->client_id) + ": \"" + req.get_line()+"\" from " + thread_data->client_ip + " @ " + get_current_time();
+  std::string request_log = std::to_string(client_id) + ": \"" + req.get_line()+"\" from " + get_peer_socket_ip(client_socket_fd) + " @ " + get_current_time();
   write_log_with_lock(request_log);
 
   //handle request according to the method
@@ -103,11 +202,11 @@ void * Proxy::handle_request(void * info){
       throw std::invalid_argument("cannot connect to origin server");
     }
     if(req.get_method() == "CONNECT"){
-      handle_connect(client_socket_fd,origin_server_fd,thread_data->client_id);
+      handle_connect(client_socket_fd,origin_server_fd,client_id);
     }else if(req.get_method() == "POST"){
-      handle_post(client_socket_fd,origin_server_fd,thread_data->client_id,req,req_msg_partial);
+      handle_post(client_socket_fd,origin_server_fd,client_id,req,req_msg_partial);
     }else{
-      handle_get(client_socket_fd,origin_server_fd,thread_data->client_id,req,req_msg_partial);
+      handle_get(client_socket_fd,origin_server_fd,client_id,req,req_msg_partial);
     }
   }catch (std::invalid_argument &e){
     write_log_with_lock("(no-id): Error: " + std::string(e.what()));
@@ -117,8 +216,7 @@ void * Proxy::handle_request(void * info){
   }
 
   close(origin_server_fd);
-
-
+  return NULL;
 }
 
 void Proxy::handle_get(int client_socket_fd, int origin_socket_fd, int client_id, Request& req,std::string &req_msg){
@@ -332,5 +430,24 @@ void Proxy::save_response_to_cache(std::string key,Response &res,int client_id){
   }
   cache.insert(key,res);
 }
+
+Proxy::~Proxy() {
+  //close the log file
+  pthread_mutex_destroy(&log_mutex);
+  log_file.close();
+
+  for (auto reactor : worker_reactors) {
+    reactor->stop();
+  }
+
+  for (size_t i = 0; i < worker_threads.size(); ++i) {
+    pthread_join(worker_threads[i], NULL);
+    delete worker_reactors[i];
+    close(pipes[i].first);
+    close(pipes[i].second);
+  }
+
+  close(main_epoll_fd);
+};
 
 
