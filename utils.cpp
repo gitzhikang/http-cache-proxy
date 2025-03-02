@@ -165,7 +165,7 @@ std::string get_peer_socket_ip(int socket_fd) {
     socklen_t addr_size = sizeof(struct sockaddr_in);
     int ret = getpeername(socket_fd, (struct sockaddr *)&addr, &addr_size);
     if (ret < 0) {
-        throw std::invalid_argument("getpeername failed");
+        return "Unknown host";
     }
 
     char ip_str[INET_ADDRSTRLEN];
@@ -201,12 +201,11 @@ void get_entire_http_request_by_content_length(int client_socket_fd, std::string
     }
 
     while(content_length>received_body_length){
-         char buffer[1024];
+         char buffer[4096];
          int len = recv(client_socket_fd,buffer,sizeof(buffer),0);
          if(len == -1){
               throw std::invalid_argument("Error: cannot receive request");
          }
-         std::string buffer_str(buffer,len);
          received_body_length += len;
          req_msg += std::string(buffer,len);
     }
@@ -234,10 +233,8 @@ void get_entire_http_content(int recv_fd, std::string &msg){
     if (chunked_pos != std::string::npos && chunked_pos < header_end) {
         is_chunked = true;
     }
-    if(is_chunked) {
-        get_entire_chunked_response(recv_fd, msg, header_end + 4); // +4 for "\r\n\r\n"
-    }else {
-        //2. get the content length
+    if(!is_chunked) {
+        //1get the content length
         int content_length = get_content_length_from_head(msg);
         get_entire_http_request_by_content_length(recv_fd,msg,content_length);
     }
@@ -264,110 +261,7 @@ size_t get_content_length_from_head(std::string &http_head){
     return content_length;
 }
 
-void get_entire_chunked_response(int recv_fd, std::string &req_msg, size_t content_start) {
-    // 保存原始headers以便后续修改
-    std::string headers = req_msg.substr(0, content_start);
 
-    // 用于存储解码后的响应体
-    std::string decoded_body;
-
-    // 保存当前处理位置
-    size_t current_pos = content_start;
-
-    while (true) {
-        bool need_more_data = false;
-
-        // 尝试处理当前缓冲区中的所有块
-        while (true) {
-            // 查找块大小行结束位置
-            size_t chunk_size_end = req_msg.find("\r\n", current_pos);
-            if (chunk_size_end == std::string::npos) {
-                need_more_data = true;
-                break;
-            }
-
-            // 解析块大小(十六进制)
-            std::string chunk_size_str = req_msg.substr(current_pos, chunk_size_end - current_pos);
-            int chunk_size = 0;
-            std::istringstream(chunk_size_str) >> std::hex >> chunk_size;
-
-            // 如果块大小为0，表示结束
-            if (chunk_size == 0) {
-                // 检查是否有最终CRLF
-                if (chunk_size_end + 4 <= req_msg.length()) {
-                    // 响应完成，现在去除Transfer-Encoding头并添加Content-Length
-                    std::string modified_headers;
-                    std::istringstream header_stream(headers);
-                    std::string line;
-                    bool has_empty_line = false;
-
-                    // 处理每一行头部
-                    while (std::getline(header_stream, line)) {
-                        // 检查是否是空行
-                        if (line.empty() || (line.size() == 1 && line[0] == '\r')) {
-                            // 记录找到空行，但暂不添加
-                            has_empty_line = true;
-                            continue;
-                        }
-
-                        // 恢复可能被getline移除的\r
-                        if (!line.empty() && line.back() != '\r') {
-                            line += '\r';
-                        }
-
-                        // 跳过Transfer-Encoding头
-                        if (line.find("Transfer-Encoding:") == std::string::npos) {
-                            modified_headers += line + "\n";
-                        }
-                    }
-
-                    // 添加Content-Length头
-                    modified_headers += "Content-Length: " + std::to_string(decoded_body.size()) + "\r\n";
-
-                    // 添加空行分隔头部和响应体
-                    modified_headers += "\r\n";
-
-                    // 重建完整响应
-                    req_msg = modified_headers + decoded_body;
-                    return;
-                } else {
-                    need_more_data = true;
-                    break;
-                }
-            }
-
-            // 检查是否有完整的数据块
-            if (chunk_size_end + 2 + chunk_size + 2 > req_msg.length()) {
-                need_more_data = true;
-                break;
-            }
-
-            // 提取块数据并添加到解码内容
-            size_t chunk_data_start = chunk_size_end + 2; // 跳过CRLF
-            decoded_body.append(req_msg.substr(chunk_data_start, chunk_size));
-
-            // 移动到下一块
-            current_pos = chunk_data_start + chunk_size + 2; // 跳过块数据和尾部CRLF
-        }
-
-        if (need_more_data) {
-            // 接收更多数据
-            char buffer[8192];
-            int len = recv(recv_fd, buffer, sizeof(buffer), 0);
-            if (len <= 0) {
-                if (len == 0) {
-                    throw std::invalid_argument("Error: connection closed before complete chunked response");
-                } else {
-                    throw std::invalid_argument("Error: cannot receive response from origin server");
-                }
-            }
-            req_msg += std::string(buffer, len);
-        } else {
-            // 所有块都已处理
-            break;
-        }
-    }
-}
 
 std::string add_Via_to_response(const char * content,std::string &host){
     std::string modified_content = content;
@@ -388,7 +282,7 @@ std::string add_Via_to_response(const char * content,std::string &host){
         if(headers_end != std::string::npos) {
             // Insert new Via header before the end of headers
             std::string new_via = via_header + host + "\r\n";
-            modified_content.insert(headers_end, "\r\n" + new_via);
+            modified_content.insert(headers_end+2, new_via);
         }
     }
 
@@ -422,7 +316,7 @@ std::string add_Age_to_response(const char * content,Response &res){
         if(headers_end != std::string::npos) {
             // Insert new Age header before the end of headers
             std::string new_age = age_header + std::to_string(age) + "\r\n";
-            modified_content.insert(headers_end, "\r\n" + new_age);
+            modified_content.insert(headers_end+2, new_age);
         }
     }
 

@@ -6,6 +6,7 @@
 #include "request.h"
 
 #include <algorithm>
+#include <iostream>
 #include <stdexcept>
 
 #include "utils.h"
@@ -42,6 +43,8 @@ void Request::pharse_request(std::string request){
     if (host_line.empty()) {
         throw std::invalid_argument("Invalid request: Empty Host value");
     }
+
+    std::cout<<host_line<<std::endl;
 
     // 3. pharse the host and port
     size_t port_begin = host_line.find_first_of(':');

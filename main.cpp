@@ -4,5 +4,5 @@
 int main()
 {
     Proxy proxy("12345","log.txt");
-    proxy.run();
+    proxy.run(64);
 }

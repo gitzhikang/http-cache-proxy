@@ -57,31 +57,47 @@ void WorkerReactor::run(){
                 int fd = events[i].data.ptr ? static_cast<ConnectionInfo*>(events[i].data.ptr)->client_socket_fd : pipe_read_fd;
 
                 if (fd == pipe_read_fd) {
-                    // 从管道读取新连接信息
-                    std::cout << "Worker is reading connection info" << std::endl;
-                    ConnectionInfo conn_info;
-                    ssize_t size = read(pipe_read_fd, &conn_info, sizeof(conn_info));
+                    // 从管道读取新连接信息 - ET模式下需要循环读取所有数据
 
-                    if (size == sizeof(conn_info)) {
+                while (true) {  // 循环读取直到没有更多数据
+                    ConnectionInfo new_conn;
+                    ssize_t size = read(pipe_read_fd, &new_conn, sizeof(new_conn));
+
+
+                    if (size == -1) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            // 没有更多数据可读
+                            break;
+                        }
+                        perror("Worker read from pipe");
+                        break;
+                    } else if (size == 0) {
+                        // 管道已关闭
+                        break;
+                    } else if (size == sizeof(new_conn)) {
                         // 将客户端socket设为非阻塞
-                        set_nonblocking(conn_info.client_socket_fd);
+                        set_nonblocking(new_conn.client_socket_fd);
 
                         // 添加到epoll
                         struct epoll_event ev;
                         ev.events = EPOLLIN | EPOLLET; // ET
-                        ev.data.ptr = new ConnectionInfo{conn_info.client_socket_fd, conn_info.client_id};
+                        ev.data.ptr = new ConnectionInfo{new_conn.client_socket_fd, new_conn.client_id};
 
-                        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, conn_info.client_socket_fd, &ev) == -1) {
+                        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_conn.client_socket_fd, &ev) == -1) {
                             perror("Worker epoll_ctl: client_socket_fd");
-                            close(conn_info.client_socket_fd);
+                            close(new_conn.client_socket_fd);
                             delete static_cast<ConnectionInfo*>(ev.data.ptr);
                             continue;
                         }
+                    } else {
+                        // 读取了部分数据，这是一个错误情况
+                        std::cerr << "Partial read from pipe: " << size << " bytes" << std::endl;
+                        break;
                     }
+                }
                 } else {
                     // 处理客户端请求
                     ConnectionInfo* conn_info = static_cast<ConnectionInfo*>(events[i].data.ptr);
-					std::cout << "Worker is submit task to threadpool" << std::endl;
 
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL); // 从epoll中删除，避免其他线程处理
 

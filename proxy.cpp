@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <sys/socket.h>
+#include <regex>
 
 std::string response_400 = "HTTP/1.1 400 Bad Request\r\n\r\n";
 std::string response_200 = "HTTP/1.1 200 OK\r\n\r\n";
@@ -23,6 +24,7 @@ std::string response_502 = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
 
 void Proxy::run(int worker_count, int thread_pool_size) {
   std::cout<<"Proxy server is running on port "<<port_num<<std::endl;
+  write_log_with_lock("(no-id): Proxy server is running on port " + std::string(port_num));
   main_epoll_fd = epoll_create1(0);
   if(main_epoll_fd == -1){
     write_log_with_lock("(no-id): Error cannot create main epoll instance");
@@ -56,6 +58,12 @@ void Proxy::run(int worker_count, int thread_pool_size) {
     int pipe_fds[2];
     if (pipe(pipe_fds) == -1) {
       perror("pipe");
+      exit(EXIT_FAILURE);
+    }
+
+    if (WorkerReactor::set_nonblocking(pipe_fds[0]) == -1 ||
+    WorkerReactor::set_nonblocking(pipe_fds[1]) == -1) {
+      perror("Setting pipe non-blocking");
       exit(EXIT_FAILURE);
     }
 
@@ -106,7 +114,6 @@ void Proxy::run(int worker_count, int thread_pool_size) {
         int worker_index = next_worker;
         next_worker = (next_worker + 1) % worker_reactors.size();
 
-        std::cout << "Sending connection info to worker " << worker_index << std::endl;
         // 将连接信息写入对应worker的管道
         write(pipes[worker_index].second, &conn_info, sizeof(conn_info));
       }
@@ -160,7 +167,7 @@ void * Proxy::handle_request(ConnectionInfo* conn_info){
   int client_id = conn_info->client_id;
 
   //the length of HTTP head is less than 8KB, to fetch the http head
-  char req_msg_buffer[8192];
+  char req_msg_buffer[16384];
   int bytes_received = recv(client_socket_fd,req_msg_buffer,sizeof(req_msg_buffer),0);
   if(bytes_received == -1){
     write_log_with_lock("(no-id): Error: cannot receive request message from client");
@@ -194,8 +201,10 @@ void * Proxy::handle_request(ConnectionInfo* conn_info){
   write_log_with_lock(request_log);
 
   //handle request according to the method
-  const char * host = req.get_host().c_str();
-  const char * port = req.get_port().c_str();
+  std::string host_str = req.get_host();
+  std::string port_str = req.get_port();
+  const char * host = host_str.c_str();
+  const char * port = port_str.c_str();
   int origin_server_fd = build_client_socket(host,port);
   try{
     if(origin_server_fd == -1){
@@ -212,10 +221,12 @@ void * Proxy::handle_request(ConnectionInfo* conn_info){
     write_log_with_lock("(no-id): Error: " + std::string(e.what()));
     //send 400 to the client
     close(origin_server_fd);
+    close(client_socket_fd);
     return NULL;
   }
 
   close(origin_server_fd);
+  close(client_socket_fd);
   return NULL;
 }
 
@@ -255,13 +266,30 @@ void Proxy::handle_get(int client_socket_fd, int origin_socket_fd, int client_id
       }else if(validation_res.get_response_code() == "200"){
         //if the response code is 200, update the cache and send the response to the client
         write_log_with_lock(std::to_string(client_id) + ": NOTE cache is not valid after validation");
-        save_response_to_cache(query_key,validation_res,client_id);
-        send_response_to_client(client_socket_fd,false,validation_res.get_origin_response().c_str(),cached_res);
+        if(validation_res.is_chunked()) {
+          //if the response is chunked, do not cache
+          write_log_with_lock(std::to_string(client_id) + ": not cacheable because chunked");
+          //send the response to the client
+          send(client_socket_fd,response_buffer.c_str(),response_buffer.size(),0);
+          //receive the rest of the response
+          char msg_buffer[8192] = {0};
+          while(true) {
+            int len = recv(origin_socket_fd, msg_buffer, sizeof(msg_buffer), 0);
+            if (len <= -1) {
+              write_log_with_lock(std::to_string(client_id) + ": Error when receiving chunked response");
+              break;
+            }
+            send(client_socket_fd, msg_buffer, len, 0);
+          }
+        }else {
+          save_response_to_cache(query_key,validation_res,client_id);
+          send_response_to_client(client_socket_fd,false,validation_res.get_origin_response().c_str(),cached_res);
+        }
         write_log_with_lock(std::to_string(client_id) + ": Responding \"" + validation_res.get_line());
       }else{
         //if the response code is 400 or other error codes, send the 502 response to the client
         send(client_socket_fd,response_502.c_str(),response_502.size(),0);
-        write_log_with_lock(std::to_string(client_id) + ": Responding \"" + response_502);
+        write_log_with_lock(std::to_string(client_id) + ": Responding \"HTTP/1.1 502 Bad Gateway\" ");
       }
     }else{
       //verify the time of the cached response
@@ -324,11 +352,31 @@ void Proxy::handle_cache_miss(int client_socket_fd, int origin_socket_fd, int cl
 
   //4. save in the cache
   if(res.get_response_code() == "200"){
-    save_response_to_cache(get_cache_query_key(client_socket_fd,req),res,client_id);
+    if(res.is_chunked()) {
+      //if the response is chunked, do not cache
+      write_log_with_lock(std::to_string(client_id) + ": not cacheable because chunked");
+      //send the response to the client
+      send(client_socket_fd,response_buffer.c_str(),response_buffer.size(),0);
+      //receive the rest of the response
+      char msg_buffer[8192] = {0};
+      while(true) {
+        int len = recv(origin_socket_fd, msg_buffer, sizeof(msg_buffer), 0);
+        if (len <= -1) {
+          write_log_with_lock(std::to_string(client_id) + ": Error when receiving chunked response");
+          break;
+        }
+        send(client_socket_fd, msg_buffer, len, 0);
+      }
+    }else {
+      save_response_to_cache(get_cache_query_key(client_socket_fd,req),res,client_id);
+    }
+  }else if(std::regex_match(res.get_response_code(), std::regex("^3\\d{2}$")) ) {
+    //if the response code is 301, send the response to the client
+    send_response_to_client(client_socket_fd,false,response_buffer.c_str(),res);
   }else{
     //if the response code is not 200, send 502 to the client
     send(client_socket_fd,response_502.c_str(),response_502.size(),0);
-    write_log_with_lock(std::to_string(client_id) + ": Responding \"" + response_502);
+    write_log_with_lock(std::to_string(client_id) + ": Responding \"HTTP/1.1 502 Bad Gateway\" ");
     return;
   }
 
@@ -354,6 +402,9 @@ void Proxy::handle_post(int client_socket_fd, int origin_socket_fd, int client_i
     res.pharse_line(response_buffer);
     write_log_with_lock(std::to_string(client_id) + ": Received \"" + res.get_line() + "\" from " + req.get_host());
 
+    //test
+    // write_log_with_lock(response_buffer);
+
     //send the response to the client
     send_response_to_client(client_socket_fd,false,response_buffer.c_str(),res);
 //    send(client_socket_fd,,response_buffer.size(),0);
@@ -366,7 +417,7 @@ void Proxy::handle_connect(int client_socket_fd, int origin_socket_fd, int clien
   //send 200 to the client
   send(client_socket_fd,response_200.c_str(),response_200.size(),0);
   // write log
-  write_log_with_lock(std::to_string(client_id) + ": Responding \"HTTP/1.1 200 OK\"");
+  write_log_with_lock(std::to_string(client_id) + ": Responding \"HTTP/1.1 200 OK\" ");
   //use select to monitor multiple file descriptors
   fd_set readfds;
   int max_fd = std::max(client_socket_fd,origin_socket_fd);
@@ -387,15 +438,18 @@ void Proxy::handle_connect(int client_socket_fd, int origin_socket_fd, int clien
       if(FD_ISSET(fd[i], &readfds)){
         int len = recv(fd[i],msg_buffer,sizeof(msg_buffer),0);
         if(len<=0){
+          write_log_with_lock(std::to_string(client_id) + ": Tunnel closed");
           return;
         }else{
           if(send(fd[1-i],msg_buffer,len,0) == -1){
+            write_log_with_lock(std::to_string(client_id) + ": Tunnel closed");
             return;
           }
         }
       }
     }
   }
+
 }
 
 void Proxy::send_response_to_client(int client_socket_fd, bool is_cache_hit,const char * content,Response &res){

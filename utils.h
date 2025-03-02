@@ -39,7 +39,6 @@ std::string max_age_to_GMT(std::string& response_time_str,int max_age);
 
 bool is_GMT_time_greater_than_current_time(std::string &time_str);
 
-void get_entire_chunked_response(int recv_fd, std::string &req_msg, size_t content_start);
 
 
 #endif //UTILS_H
